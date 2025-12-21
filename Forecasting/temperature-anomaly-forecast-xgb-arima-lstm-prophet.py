@@ -7,6 +7,7 @@ import pandas as pd
 import numpy as np
 import warnings
 import matplotlib.pyplot as plt
+
 from pathlib import Path
 warnings.filterwarnings('ignore')
 
@@ -31,31 +32,37 @@ from keras.optimizers import Adam
 from keras.models import load_model
 from keras import layers
 
+tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
+
 
 from utils import load_caribbean_weather
 
 # Configuration variables
-TEST_SIZE = 36
+LOOKBACK = 12
+TEST_SIZE = 24
+LAGS = 12
+FUTURE = 24
+TARGET_COL = 'temp_anomaly'
 
 def load_and_prepare_data():
     print("\nLoading data...")
     # Load the dataset
-    df = load_caribbean_weather()[['temp_anomaly']]
+    df = load_caribbean_weather()[[TARGET_COL]]
 
     return df
 
-def create_lag_features(df, target_col, lags=[1, 2]):
+def create_lag_features(df, target_col = TARGET_COL, lags = 12):
     """Create lagged features for XGBoost training"""
     df = df.copy()
-    for lag in lags:
+    for lag in range(1, lags + 1):
         df[f'lag_{lag}'] = df[target_col].shift(lag)
 
     # based on acf and pacf results, seasonality seems to be repeating every 3 years,
     # therefore, rolling stats is set to be with window = 36 months
 
     #Warning: had to change back to window = 3 because the test set was smaller than 48 months
-    df['rolling_mean_3'] = df[target_col].rolling(window=3).mean()
-    df['rolling_std_3'] = df[target_col].rolling(window=3).std()
+    df['rolling_mean_48'] = df[target_col].rolling(window=48).mean()
+    df['rolling_std_48'] = df[target_col].rolling(window=48).std()
 
     # Trend features for stationarity
     df['temp_diff_1'] = df[target_col].diff(1)
@@ -68,28 +75,58 @@ def prophet_df(df):
     df = df.reset_index()
 
     ds = df['date']
-    y = df['temp_anomaly']
+    y = df[TARGET_COL]
 
     df = pd.DataFrame({'ds': ds, 'y': y})
 
     return df
-def create_sequences(df_to_np, lookback):
+def create_sequences(df, lookback):
     """Create lookback sequences for LSTM"""
     #convert the df to numpy
-    #df_to_np = df.to_numpy()
+    df_to_np = df.to_numpy()
     X, y = [],[]
 
     for i in range(len(df_to_np) - lookback):
         X.append(df_to_np[i:i+lookback])
         y.append(df_to_np[i + lookback])
-    #print("in create_sequences X:",X)
+    
     return np.array(X), np.array(y)
+
+def prepare_data_for_xgb(data, lags = LAGS):
+
+    # Create features
+    data_lags = create_lag_features(data.copy(), TARGET_COL, lags)
+    #test_lags = create_lag_features(test.copy(), 'temp_anomaly')
+
+    train = data_lags[:-TEST_SIZE]
+    test = data_lags[-TEST_SIZE:]
+
+    feature_cols = [c for c in data_lags.columns if c not in [TARGET_COL]]
+
+    #print(f'features_cols = {feature_cols}')
+    #print(f'train = {train[:3]}')
+
+    X_train = train[feature_cols]
+    y_train = train[TARGET_COL]
+
+    X_test = test[feature_cols]
+    y_test = test[TARGET_COL]
+
+    return X_train, X_test, y_train, y_test, feature_cols
+
+def prepare_data_for_lstm(data, lookback):
+
+    X_lstm, y_lstm = create_sequences(data, lookback)
+    X_train, y_train = X_lstm[:-TEST_SIZE], y_lstm[:-TEST_SIZE]
+    X_test, y_test = X_lstm[-TEST_SIZE:], y_lstm[-TEST_SIZE:]
+
+    return X_train, X_test, y_train, y_test
 
 def visualize_results(train, test, models, future):
         """Create comparison visualization"""
         print("\nGenerating visualizations...")
         
-        fig, axes = plt.subplots(2, 3, figsize=(14, 7))
+        fig, axes = plt.subplots(2, 3, figsize=(16, 8))
         
         test_years = test.index.year
 
@@ -149,7 +186,7 @@ def visualize_results(train, test, models, future):
         bars = ax4.bar(model_names, maes, color=['#3498db', '#2ecc71', '#f39c12', '#e74c3c'], 
                     alpha=0.8, edgecolor='black', linewidth=1.5)
         ax4.set_ylabel('MAE (mm)', fontsize=12, fontweight='bold')
-        ax4.set_title('Model Performance', fontsize=12, fontweight='bold')
+        ax4.set_title('Model Performance', fontsize=10, fontweight='bold')
         ax4.grid(True, alpha=0.3, axis='y')
         
         # Add values on bars
@@ -176,6 +213,8 @@ def visualize_results(train, test, models, future):
         
         plt.suptitle('Caribbean Region Temperature Anomaly Forecast')
         plt.xticks(rotation=60)
+
+        plt.subplots_adjust(hspace=0.5) #adjust the hspace to avoid ovelapping
         plt.show()
 
 def train_sarima(train_data, test_data):
@@ -208,29 +247,32 @@ def train_sarima(train_data, test_data):
         'rmse': rmse
     }
 
-def train_lstm(train, test, lookback=12):
+def train_lstm(X_train, X_test, y_train, y_test, lookback=LOOKBACK):
     """Train LSTM model"""
     print("\n[2/4] Training LSTM...")
-    
+
+    print(X_train[:5])
     # Scale data
-    scaler = StandardScaler()
-    train_scaled = scaler.fit_transform(train[['temp_anomaly']])
-    test_scaled = scaler.transform(test[['temp_anomaly']])
+    #scaler = StandardScaler()
+    #X_train_scaled = scaler.fit_transform(X_train['temp_anomaly'])
+    #X_test_scaled = scaler.transform(X_test[['temp_anomaly']])
+    #y_train_scaled = scaler.transform(y_train[['temp_anomaly']])
+    #y_test_scaled = scaler.transform(y_test[['temp_anomaly']])
 
     #print(f'test_scaled length = {len(test_scaled)}')
 
     # Create training and testing sets from scaled data and create sequences of 12 months
-    X_train, y_train = create_sequences(train_scaled, lookback)
-    X_test, y_test = create_sequences(test_scaled, lookback)
+    #X_train, y_train = create_sequences(train_scaled, lookback)
+    #X_test, y_test = create_sequences(test_scaled, lookback)
 
-    print("Before reshape")
-    print(f"X_train.shape = {X_train.shape}, X_test.shape = {X_test.shape}")
+    #print("Before reshape")
+    #print(f"X_train.shape = {X_train.shape}, X_test.shape = {X_test.shape}")
 
     X_train = X_train.reshape((X_train.shape[0], X_train.shape[1], 1))
     X_test = X_test.reshape((X_test.shape[0], X_test.shape[1], 1))
 
-    print("After reshape")
-    print(f"X_train.shape = {X_train.shape}, X_test.shape = {X_test.shape}")
+    #print("After reshape")
+    #print(f"X_train.shape = {X_train.shape}, X_test.shape = {X_test.shape}")
 
     ## Build the lstm model, create callback
     model = Sequential([
@@ -253,44 +295,34 @@ def train_lstm(train, test, lookback=12):
 
     # Predict the test set
     y_pred = model.predict(X_test, verbose=0)
-    y_pred_unscaled = scaler.inverse_transform(y_pred)
-    y_test_unscaled = scaler.inverse_transform(y_test.reshape(-1, 1))
+    #y_pred_unscaled = scaler.inverse_transform(y_pred)
+    #y_test_unscaled = scaler.inverse_transform(y_test_scaled.reshape(-1, 1))
 
-    mae = mean_absolute_error(y_test_unscaled, y_pred_unscaled)
-    rmse = np.sqrt(mean_squared_error(y_test_unscaled, y_pred_unscaled))
+    #mae = mean_absolute_error(y_test_unscaled, y_pred_unscaled)
+    #rmse = np.sqrt(mean_squared_error(y_test_unscaled, y_pred_unscaled))
+
+    mae = mean_absolute_error(y_test, y_pred)
+    rmse = np.sqrt(mean_squared_error(y_test, y_pred))
     
     print(f'y_pred.shape = {y_pred.shape}')
     print(f"  MAE: {mae:.3f} mm | RMSE: {rmse:.3f} mm")
     
     return {
         'model': model,
-        'scaler': scaler,
-        'predictions': y_pred_unscaled.flatten(),
-        'actuals': y_test_unscaled.flatten(),
+        'predictions': y_pred.flatten(),
+        'actuals': y_test.flatten(),
         'mae': mae,
         'rmse': rmse,
         'lookback': lookback
     }
 
-def train_xgboost(train, test):
+def train_xgboost(X_train, X_test, y_train, y_test, feature_cols):
     """Train XGBoost model"""
     print("\n[3/4] Training XGBoost...")
 
-    # Create features
-    train_lags = create_lag_features(train.copy(), 'temp_anomaly')
-    test_lags = create_lag_features(test.copy(), 'temp_anomaly')
-
-    feature_cols = [c for c in train_lags.columns if c not in ['temp_anomaly']]
-
-    X_train = train_lags[feature_cols]
-    y_train = train_lags['temp_anomaly']
-
-    X_test = test_lags[feature_cols]
-    y_test = test_lags['temp_anomaly']
-
     #Train the XGBoost 
     xgb_model = xgb.XGBRegressor(
-        n_estimators = 100,
+        n_estimators = 200,
         max_depth = 3,
         learning_rate = 0.0001,
         subsample = 0.8,
@@ -358,7 +390,7 @@ def train_prophet(train, test):
         'rmse': rmse
     }
 
-def forecast_future(data, model, duration=12):
+def forecast_future(data, model, duration=24):
     """Predicting future precipitation"""
     print(f"\nPredicting future {duration} months with Prophet")
 
@@ -375,47 +407,54 @@ def forecast_future(data, model, duration=12):
     model.fit(data)
 
     #Make future dataframe for the next 12 months (Jan 2026 to Dec 2026)
-    future = model.make_future_dataframe(periods=12, freq='MS')
+    future = model.make_future_dataframe(periods=FUTURE, freq='MS')
 
     # Generate forecast
     forecast = model.predict(future)
 
     # The forecast for the next 12 months
-    forecast_next_12 = forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(12)
-    forecast_next_12 = forecast_next_12.round(2)
+    forecast_next = forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(12)
+    forecast_next = forecast_next.round(2)
     #forecast_next_12['ds'] = forecast_next_12['ds'].dt.strftime('%Y-%m')
 
-    print("Forecasted Caribbean Precipitation for 2026 (mm):")
-    print(forecast_next_12[['ds', 'yhat', 'yhat_lower', 'yhat_upper']])
+    print("Forecasted Caribbean Temperature Anomaly for 2026 (mm):")
+    print(forecast_next[['ds', 'yhat', 'yhat_lower', 'yhat_upper']])
 
     return {
         'model' : model,
-        'future_forecast' : forecast_next_12
+        'future_forecast' : forecast_next
     }
+
 
 def main():
 
     """Main execution"""
     print("=" * 80)
-    print("TIME SERIES FORECASTING - PRODUCTION RUN")
+    print("TIME SERIES FORECASTING - Caribbean Climate")
     print("=" * 80)
 
     # Load data
     data = load_and_prepare_data()
 
+    # Create sequences first for LSTM
+    X_train_lstm, X_test_lstm, y_train_lstm, y_test_lstm = prepare_data_for_lstm(data, LOOKBACK)
+    print(f"\nLSTM Train: {len(X_train_lstm)} months | Test: {len(X_test_lstm)} months")
+    lstm_results = train_lstm(X_train_lstm, X_test_lstm, y_train_lstm, y_test_lstm, LOOKBACK)
+
+    # Create lag and time features for xgb
+    X_train, X_test, y_train, y_test, fc = prepare_data_for_xgb(data, lags = LAGS)
+    print(f"\nXGBoost Train: {len(X_train)} months | Test: {len(X_test)} months")
+    xgb_results = train_xgboost(X_train, X_test, y_train, y_test, fc)
 
     # Split train/test
-    train = data[:-TEST_SIZE] # everything until the last 24 months
-    test = data[-TEST_SIZE:] # the last 24 months
+    train = data[:-TEST_SIZE] # everything until the last TEST_SIZE months
+    test = data[-TEST_SIZE:] # the last TEST_SIZE months
 
-    print(f"\nTrain: {len(train)} months | Test: {len(test)} months")
-
-    # Train models
+    # Train the rest of the models
     sarima_results = train_sarima(train, test)
-    lstm_results = train_lstm(train, test)
-    xgb_results = train_xgboost(train, test)
     prophet_results = train_prophet(train, test)
 
+    # Forecast
     future = forecast_future(data, prophet_results['model'])
 
     models = [sarima_results, lstm_results, xgb_results, prophet_results]
