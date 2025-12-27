@@ -1,4 +1,4 @@
-# Exploratory Data Analysis and Forecasting of Caribbean Region Temperature Anomalies and Precipitation using XGBoost, LSTM, Prophet and SARIMAX.
+# Time Series Exploratory Data Analysis and Forecasting - Caribbean Region Temperature Anomalies and Precipitation using XGBoost, LSTM, Prophet and SARIMAX.
 
 ## Introduction and Project Overview
 This project focuses on climate variability in Caribbean Region, utilizing historical data from the National Oceanic and Atmospheric Administration (NOAA) spanning January 1980 to December 2024. The dataset includes monthly temperature anomalies (deviations from the 1910–2000 baseline) and precipitation totals, aggregated across the Caribbean basin (approximately 10–25°N, 60–85°W). Data was sourced from NOAA's Climate Prediction Center (CPC) and Physical Sciences Laboratory (PSL) portals, comprising over 900 monthly observations per variable.
